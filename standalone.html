@@ -1,0 +1,1252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="build-id" content="cashinko-2026-02-23-latest" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>CASHINKO</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1510; }
+    #app { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; position: relative; }
+    canvas { display: block; max-width: 100%; max-height: 100%; width: auto !important; height: auto !important; }
+    #drop-btn-html { position: fixed; z-index: 10; cursor: pointer; font-family: Arial Black, sans-serif; font-size: 20px; color: #2a2000; background: linear-gradient(180deg, #d4a020, #b8860b); border: 2px solid #6a5520; border-radius: 8px; padding: 0; box-shadow: inset 0 0 0 2px rgba(0,0,0,0.2); pointer-events: auto; }
+    #drop-btn-html:hover:not(:disabled) { background: linear-gradient(180deg, #e8b028, #c9960c); }
+    #drop-btn-html:disabled { opacity: 0.5; cursor: not-allowed; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <button type="button" id="drop-btn-html" style="display:none;width:140px;height:44px;" tabindex="0">DROP</button>
+  <p id="load-msg" style="position:fixed;left:20px;top:20px;color:#fff;font-family:sans-serif;display:block;max-width:420px;z-index:9999;line-height:1.4;white-space:pre-line;">Loading...</p>
+  <script src="lib/matter.min.js"></script>
+  <script src="lib/pixi.min.js"></script>
+  <script>
+(function() {
+  var msgEl = document.getElementById('load-msg');
+  function showMsg(t) { msgEl.style.display = 'block'; msgEl.textContent = t; }
+  function hideMsg() { msgEl.style.display = 'none'; }
+  if (typeof PIXI === 'undefined' || typeof Matter === 'undefined') {
+    showMsg('Libraries missing. Run download-libs.bat, then open with run-game.bat.');
+    return;
+  }
+  try {
+  const PHYSICS_STEP_MS = 1000 / 60;
+  const CONFIG = {
+    TITLE_HEIGHT: 64,
+    PEG_ROWS: 10,
+    PEG_COLS_BASE: 2,
+    PEG_SPACING: 25,
+    PEG_RADIUS: 4,
+    BALL_RADIUS: 5,
+    POCKET_COUNT: 9,
+    BIN_MULTIPLIERS: [20, 5, 2, 1.5, 1, 1.5, 2, 5, 20],
+    SLOT_COLS: 6,
+    SLOT_ROWS: 3,
+    START_CREDITS: 1000,
+    COST_PER_DROP: 10,
+    FUNNEL_TOP_WIDTH: 120,
+    // Slot symbols: id, weight, pay, and either `display` (emoji/text) or `image` (png/jpg path)
+    SYMBOLS: [
+      { id: 'wild', image: 'assets/symbols/wild.png', display: 'wild', weight: 6, pay: 150 },
+      { id: 'lion', image: 'assets/symbols/lion.png', display: 'lion', weight: 26, pay: 25 },
+      { id: 'lioness', image: 'assets/symbols/lioness.png', display: 'lioness', weight: 20, pay: 20 },
+      { id: 'zebra', image: 'assets/symbols/zebra.png', display: 'zebra', weight: 18, pay: 18 },
+      { id: 'gazelle', image: 'assets/symbols/gazelle.png', display: 'gazelle', weight: 24, pay: 15 },
+      { id: 'flamingo', image: 'assets/symbols/flamingo.png', display: 'Flamingo', weight: 12, pay: 12 },
+      { id: 'pachinko', image: 'assets/symbols/gold-ball', display: 'GOLD BALL', weight: 10, pay: 5 }
+    ]
+  };
+
+  let boardRect = { x: 0, y: 0, w: 400, h: 320 };
+  let binRect = { x: 0, y: 0, w: 0, h: 24 };
+  let slotRect = { x: 0, y: 0, w: 0, h: 0 };
+  let credits = CONFIG.START_CREDITS;
+  let state = 'Idle';
+  let hasLanded = false;
+  let rngState = Date.now();
+  const symbolTextures = {};
+  function rng() { rngState = (rngState * 1103515245 + 12345) >>> 0; return rngState / 4294967296; }
+  function weightedPick(weights) {
+    const t = weights.reduce((a, b) => a + b, 0);
+    let v = rng() * t;
+    for (let i = 0; i < weights.length; i++) { v -= weights[i]; if (v <= 0) return i; }
+    return weights.length - 1;
+  }
+  function getSymbolTexture(symbol) {
+    if (!symbol || !symbol.image) return null;
+    if (symbolTextures[symbol.image]) return symbolTextures[symbol.image];
+    var imgPath = symbol.image;
+    if (!/\.(png|jpg|jpeg|webp)$/i.test(imgPath)) {
+      var exts = ['.png', '.PNG', '.jpg', '.JPG', '.jpeg', '.JPEG', '.webp', '.WEBP'];
+      var chosen = null;
+      for (var i = 0; i < exts.length; i++) {
+        var candidate = imgPath + exts[i];
+        var t = PIXI.Texture.from(candidate);
+        if (t && t.baseTexture && t.baseTexture.valid) { chosen = t; break; }
+      }
+      if (chosen) {
+        symbolTextures[symbol.image] = chosen;
+        return chosen;
+      }
+      var fallbackTex = PIXI.Texture.from(imgPath + '.png');
+      symbolTextures[symbol.image] = fallbackTex;
+      return fallbackTex;
+    }
+    const tex = PIXI.Texture.from(imgPath);
+    symbolTextures[symbol.image] = tex;
+    return tex;
+  }
+  function setCellSymbol(cell, symbol, cellW, cellH) {
+    if (!cell || !symbol) return;
+    const tex = getSymbolTexture(symbol);
+    const hasValidImage = !!(symbol.image && tex && tex.baseTexture && tex.baseTexture.valid);
+    if (hasValidImage) {
+      cell.sprite.texture = tex;
+      cell.sprite.width = Math.max(24, cellW * 0.90);
+      cell.sprite.height = Math.max(24, cellH * 0.90);
+      cell.sprite.visible = true;
+      cell.text.visible = false;
+      return;
+    }
+    cell.sprite.visible = false;
+    cell.text.text = symbol.display || symbol.id || '?';
+    cell.text.visible = true;
+  }
+
+  const app = new PIXI.Application({
+    width: Math.max(320, window.innerWidth),
+    height: Math.max(480, window.innerHeight),
+    backgroundColor: 0x1a1510,
+    antialias: true
+  });
+  document.getElementById('app').appendChild(app.view);
+  const LOGO_IMAGE = 'assets/logo/logo.png';
+  const logoTexture = PIXI.Texture.from(LOGO_IMAGE + '?v=' + Date.now());
+  let logoSprite = null;
+  if (logoTexture.baseTexture && !logoTexture.baseTexture.valid) {
+    logoTexture.baseTexture.once('loaded', function() { resize(); });
+  }
+
+  const bg = new PIXI.Graphics();
+  const sceneBackdropSprite = new PIXI.Sprite(PIXI.Texture.WHITE);
+  const fireflyG = new PIXI.Graphics();
+  const goldFrame = new PIXI.Graphics();
+  const titleContainer = new PIXI.Container();
+  const plinkoBg = new PIXI.Graphics();
+  const plinkoBackdropSprite = new PIXI.Sprite(PIXI.Texture.WHITE);
+  const pegG = new PIXI.Graphics();
+  const centerPegFlash = new PIXI.Graphics();
+  const funnelG = new PIXI.Graphics();
+  const binG = [];
+  const binLabels = [];
+  const slotMachineBg = new PIXI.Graphics();
+  const dropZoneBg = new PIXI.Graphics();
+  const reelCells = [];
+  const ballGraphic = new PIXI.Graphics();
+  ballGraphic.visible = false;
+
+  const BOARD_BG_CANDIDATES = [
+    'assets/board/plinko-wood.png',
+    'assets/board/plinko-wood.PNG',
+    'assets/board/plinko-wood.jpg',
+    'assets/board/plinko-wood.JPG',
+    'assets/board/plinko-wood.jpeg',
+    'assets/board/plinko-wood.JPEG',
+    'assets/board/plinko-wood.webp',
+    'assets/board/plinko-wood.WEBP'
+  ];
+  const SCENE_BG_CANDIDATES = [
+    'assets/background/savanna-night.png',
+    'assets/background/savanna-night.PNG',
+    'assets/background/savanna-night.jpg',
+    'assets/background/savanna-night.JPG',
+    'assets/background/savanna-night.jpeg',
+    'assets/background/savanna-night.JPEG',
+    'assets/background/savanna-night.webp',
+    'assets/background/savanna-night.WEBP'
+  ];
+  let boardBgTexture = null;
+  let sceneBgTexture = null;
+  function tryLoadSceneBackground(i) {
+    if (i >= SCENE_BG_CANDIDATES.length) return;
+    const tex = PIXI.Texture.from(SCENE_BG_CANDIDATES[i] + '?v=' + Date.now());
+    if (!tex || !tex.baseTexture) return;
+    if (tex.baseTexture.valid) { sceneBgTexture = tex; resize(); return; }
+    tex.baseTexture.once('loaded', function() { sceneBgTexture = tex; resize(); });
+    tex.baseTexture.once('error', function() { tryLoadSceneBackground(i + 1); });
+  }
+  function tryLoadBoardBackground(i) {
+    if (i >= BOARD_BG_CANDIDATES.length) return;
+    const tex = PIXI.Texture.from(BOARD_BG_CANDIDATES[i] + '?v=' + Date.now());
+    if (!tex || !tex.baseTexture) return;
+    if (tex.baseTexture.valid) { boardBgTexture = tex; resize(); return; }
+    tex.baseTexture.once('loaded', function() { boardBgTexture = tex; resize(); });
+    tex.baseTexture.once('error', function() { tryLoadBoardBackground(i + 1); });
+  }
+  tryLoadSceneBackground(0);
+  tryLoadBoardBackground(0);
+
+  let dropOX = 0, dropOY = 0;
+  let preDropX = 0, preDropY = 0, preDropTargetY = 0;
+  let logoShiftTargetX = 0;
+  let logoShiftActive = false;
+  let centerPegPos = { x: 0, y: 0 };
+  let centerPegFlashMs = 0;
+  let bucketBoostFactor = 1;
+  let boostSpinsRemaining = 0;
+  let boostResetPending = false;
+  const BOOST_SPIN_START = 5;
+  let prizeShift = 0;
+  let carouselShiftPending = false;
+  let carouselAnimating = false;
+  let carouselFromShift = 0;
+  let carouselProgress = 0;
+  const CAROUSEL_SHIFT_DURATION_MS = 2200;
+  let counterAnimActive = false;
+  let counterAnimProgress = 0;
+  let counterAnimFrom = 0;
+  let counterAnimTo = 0;
+  const COUNTER_ANIM_DURATION_MS = 800;
+  const fireflies = [];
+  function ensureFireflies(W, H) {
+    const target = 30;
+    while (fireflies.length < target) {
+      fireflies.push({
+        x: rng() * W,
+        y: rng() * H,
+        r: 1 + rng() * 1.8,
+        phase: rng() * Math.PI * 2,
+        speed: 0.6 + rng() * 1.1,
+        vx: (rng() - 0.5) * 8,
+        vy: -2 - rng() * 6
+      });
+    }
+    for (let i = 0; i < fireflies.length; i++) {
+      fireflies[i].x = Math.max(0, Math.min(W, fireflies[i].x));
+      fireflies[i].y = Math.max(0, Math.min(H, fireflies[i].y));
+    }
+  }
+  function mod(n, m) { return ((n % m) + m) % m; }
+  function currentVisualShift() {
+    if (!carouselAnimating) return prizeShift;
+    const p = Math.min(1, carouselProgress);
+    return carouselFromShift + p;
+  }
+  function positionBucketLabels() {
+    const n = CONFIG.POCKET_COUNT;
+    const shift = currentVisualShift();
+    for (let i = 0; i < binLabels.length; i++) {
+      if (!binLabels[i]) continue;
+      if (binLabels[i].parent === app.stage) {
+        // Keep prize labels on the top-most layer at all times.
+        app.stage.addChild(binLabels[i]);
+      }
+      const xSlot = mod(i + shift, n);
+      binLabels[i].x = binRect.x + (xSlot + 0.5) * binRect.w;
+      binLabels[i].y = binRect.y + binRect.h / 2;
+      binLabels[i].scale.set(1, 1);
+    }
+  }
+  function startCarouselShiftIfPending() {
+    if (!carouselShiftPending || carouselAnimating) return;
+    carouselShiftPending = false;
+    carouselAnimating = true;
+    carouselFromShift = prizeShift;
+    carouselProgress = 0;
+  }
+  function completeCarouselShift() {
+    if (!carouselAnimating) return;
+    prizeShift = mod(carouselFromShift + 1, CONFIG.POCKET_COUNT);
+    carouselAnimating = false;
+    carouselProgress = 0;
+    updateBucketLabelStyles();
+    positionBucketLabels();
+  }
+  function getPocketMultiplier(pocketIndex) {
+    const prizeIndex = mod(pocketIndex - prizeShift, CONFIG.POCKET_COUNT);
+    return CONFIG.BIN_MULTIPLIERS[prizeIndex] * bucketBoostFactor;
+  }
+  function syncBoostFromCounter() {
+    if (boostSpinsRemaining > 0) {
+      // Keep any stacked doubling from red-pin re-hits.
+      if (bucketBoostFactor < 2) bucketBoostFactor = 2;
+    } else if (!boostResetPending) {
+      bucketBoostFactor = 1;
+    }
+    updateBucketLabelStyles();
+  }
+  function applyPendingBoostReset() {
+    if (!boostResetPending) return;
+    boostResetPending = false;
+    bucketBoostFactor = 1;
+    updateBucketLabelStyles();
+  }
+  function activateRedBoost() {
+    if (boostSpinsRemaining > 0) {
+      // Stack doubling during active boost spins.
+      bucketBoostFactor *= 2;
+      updateBucketLabelStyles();
+      return;
+    }
+    boostSpinsRemaining = BOOST_SPIN_START;
+    counterAnimActive = false;
+    counterAnimProgress = 0;
+    counterAnimFrom = boostSpinsRemaining;
+    counterAnimTo = boostSpinsRemaining;
+    boostCounterCur.text = String(boostSpinsRemaining);
+    boostCounterNext.text = '';
+    bucketBoostFactor = 2;
+    syncBoostFromCounter();
+  }
+  function startBoostCountdownAnimation(fromValue, toValue) {
+    counterAnimFrom = fromValue;
+    counterAnimTo = toValue;
+    counterAnimProgress = 0;
+    counterAnimActive = true;
+  }
+  function consumeBoostSpinIfActive() {
+    if (boostSpinsRemaining <= 0) return;
+    const fromValue = boostSpinsRemaining;
+    boostSpinsRemaining = Math.max(0, boostSpinsRemaining - 1);
+    if (boostSpinsRemaining === 0) boostResetPending = true;
+    syncBoostFromCounter();
+    startBoostCountdownAnimation(fromValue, boostSpinsRemaining);
+  }
+  function formatMultiplier(v) {
+    const n = Math.round(v * 100) / 100;
+    return (n % 1 === 0) ? String(n | 0) : String(n);
+  }
+  function updateBucketLabelStyles() {
+    for (let i = 0; i < binLabels.length; i++) {
+      if (!binLabels[i]) continue;
+      const m = CONFIG.BIN_MULTIPLIERS[i] * bucketBoostFactor;
+      binLabels[i].text = 'x' + formatMultiplier(m);
+      binLabels[i].style.fill = (bucketBoostFactor > 1) ? 0xff5555 : 0xccccaa;
+      binLabels[i].alpha = 1;
+    }
+    positionBucketLabels();
+  }
+  const creditsLabel = new PIXI.Text('CREDITS', { fontFamily: 'Arial', fontSize: 11, fill: 0xaa9966 });
+  const creditsText = new PIXI.Text('1000', { fontFamily: 'Arial Black', fontSize: 24, fill: 0xffdd44 });
+  const payoutLabel = new PIXI.Text('PAYOUT', { fontFamily: 'Arial', fontSize: 11, fill: 0xaa9966 });
+  const payoutText = new PIXI.Text('0', { fontFamily: 'Arial Black', fontSize: 24, fill: 0x88ff88 });
+  const boostCounterBox = new PIXI.Graphics();
+  const boostCounterClip = new PIXI.Graphics();
+  const boostCounterLabel = new PIXI.Text('BOOST', { fontFamily: 'Arial Black', fontSize: 10, fill: 0xffd580 });
+  const boostCounterDigits = new PIXI.Container();
+  const boostCounterCur = new PIXI.Text('0', { fontFamily: 'Arial Black', fontSize: 22, fill: 0xff5555 });
+  const boostCounterNext = new PIXI.Text('', { fontFamily: 'Arial Black', fontSize: 22, fill: 0xff5555 });
+  boostCounterLabel.anchor.set(0.5);
+  boostCounterCur.anchor.set(0.5);
+  boostCounterNext.anchor.set(0.5);
+  boostCounterDigits.addChild(boostCounterCur, boostCounterNext);
+  boostCounterDigits.mask = boostCounterClip;
+  const dropBtn = new PIXI.Graphics();
+  const dropBtnHit = new PIXI.Graphics();
+  const btnT = new PIXI.Text('DROP', { fontFamily: 'Arial Black', fontSize: 20, fill: 0x2a2000 });
+  btnT.anchor.set(0.5);
+  btnT.interactive = false;
+  btnT.interactiveChildren = false;
+
+  function computeLayout() {
+    const W = app.screen.width || window.innerWidth;
+    const H = app.screen.height || window.innerHeight;
+    const portrait = H >= W;
+    const pad = 12;
+    const frameW = Math.min(W, 420) - pad * 2;
+    const frameH = Math.min(H, 720) - pad * 2;
+    boardRect.w = frameW - 24;
+    boardRect.x = (W - frameW) / 2 + 12;
+    boardRect.y = CONFIG.TITLE_HEIGHT + 8;
+    boardRect.h = Math.floor((frameH - CONFIG.TITLE_HEIGHT - 8) * 0.52);
+    binRect.y = boardRect.y + boardRect.h - 2;
+    binRect.w = boardRect.w / CONFIG.POCKET_COUNT;
+    binRect.h = 22;
+    binRect.x = boardRect.x;
+    const slotTop = binRect.y + binRect.h + 8;
+    slotRect.x = boardRect.x;
+    slotRect.y = slotTop;
+    slotRect.w = boardRect.w;
+    slotRect.h = frameH - (slotTop - (W - frameW) / 2) - 80;
+    slotRect.h = Math.max(120, frameH - slotTop - 70);
+    return { W, H, frameW, frameH, pad, slotTop };
+  }
+
+  function resize() {
+    const { W, H, frameW, frameH, pad, slotTop } = computeLayout();
+
+    ensureFireflies(W, H);
+    bg.clear();
+    sceneBackdropSprite.x = 0;
+    sceneBackdropSprite.y = 0;
+    sceneBackdropSprite.width = W;
+    sceneBackdropSprite.height = H;
+    sceneBackdropSprite.alpha = 1;
+    sceneBackdropSprite.tint = 0xffffff;
+    if (sceneBgTexture && sceneBgTexture.baseTexture && sceneBgTexture.baseTexture.valid && sceneBackdropSprite.texture !== sceneBgTexture) {
+      sceneBackdropSprite.texture = sceneBgTexture;
+    }
+    const hasSceneBg = !!(sceneBgTexture && sceneBgTexture.baseTexture && sceneBgTexture.baseTexture.valid);
+    sceneBackdropSprite.visible = hasSceneBg;
+    if (!hasSceneBg) {
+      bg.beginFill(0x09090c);
+      bg.drawRect(0, 0, W, H);
+      bg.endFill();
+      bg.beginFill(0x1b2430, 0.75);
+      bg.drawRect(0, 0, W, H * 0.45);
+      bg.endFill();
+      bg.beginFill(0x4e3a2d, 0.42);
+      bg.drawEllipse(W * 0.5, H * 0.38, W * 0.62, H * 0.16);
+      bg.endFill();
+      bg.beginFill(0x2d1f16, 0.78);
+      bg.drawEllipse(W * 0.5, H * 0.88, W * 0.75, H * 0.26);
+      bg.endFill();
+      bg.beginFill(0xe59b3a, 0.18);
+      bg.drawCircle(W * 0.14, H * 0.18, Math.max(26, Math.min(W, H) * 0.06));
+      bg.endFill();
+      // Acacia-like silhouette accents.
+      bg.beginFill(0x130d08, 0.85);
+      bg.drawRect(W * 0.08, H * 0.52, Math.max(3, W * 0.008), H * 0.1);
+      bg.drawRect(W * 0.9, H * 0.5, Math.max(3, W * 0.008), H * 0.11);
+      bg.endFill();
+      bg.beginFill(0x17100a, 0.9);
+      bg.drawEllipse(W * 0.095, H * 0.5, W * 0.08, H * 0.03);
+      bg.drawEllipse(W * 0.915, H * 0.48, W * 0.09, H * 0.032);
+      bg.endFill();
+    }
+
+    const fx = (W - frameW) / 2;
+    const fy = (H - frameH) / 2;
+    goldFrame.clear();
+    goldFrame.lineStyle(4, 0x3d3020);
+    goldFrame.drawRoundedRect(fx, fy, frameW, frameH, 4);
+    goldFrame.lineStyle(2, 0x8b7355);
+    goldFrame.drawRoundedRect(fx + 3, fy + 3, frameW - 6, frameH - 6, 3);
+    goldFrame.lineStyle(1, 0xd4af37);
+    goldFrame.drawRoundedRect(fx + 6, fy + 6, frameW - 12, frameH - 12, 2);
+
+    titleContainer.removeChildren();
+    const centerX = (W - frameW) / 2 + frameW / 2;
+    const titleY = 22;
+    const hasLogo = !!(logoTexture && logoTexture.baseTexture && logoTexture.baseTexture.valid);
+    if (hasLogo) {
+      if (!logoSprite) {
+        logoSprite = new PIXI.Sprite(logoTexture);
+        logoSprite.anchor.set(0.5);
+      }
+      const maxLogoW = frameW - 30;
+      const maxLogoH = 58;
+      const baseW = logoTexture.width || maxLogoW;
+      const baseH = logoTexture.height || maxLogoH;
+      const s = Math.min(maxLogoW / baseW, maxLogoH / baseH);
+      logoSprite.width = Math.max(80, baseW * s);
+      logoSprite.height = Math.max(20, baseH * s);
+      dropOX = centerX;
+      logoSprite.x = centerX;
+      logoSprite.y = titleY + 6;
+      titleContainer.addChild(logoSprite);
+      dropOY = titleY + 8;
+    } else {
+      const word = 'CASHINKO';
+      const letterSpacing = Math.min(38, (frameW - 40) / word.length);
+      const oIndex = word.indexOf('O');
+      dropOX = centerX;
+      const startX = dropOX - oIndex * letterSpacing;
+      for (let i = 0; i < word.length; i++) {
+        const isO = word[i] === 'O';
+        const tx = new PIXI.Text(word[i], {
+          fontFamily: 'Arial Black',
+          fontSize: isO ? 44 : 36,
+          fill: isO ? 0xd4af37 : 0xe8dcc8
+        });
+        tx.anchor.set(0.5);
+        tx.x = startX + i * letterSpacing;
+        tx.y = titleY;
+        titleContainer.addChild(tx);
+        if (isO) {
+          dropOX = tx.x;
+          dropOY = titleY + 6;
+          const ring = new PIXI.Graphics();
+          ring.lineStyle(2, 0xd4af37);
+          ring.arc(0, 0, 18, 0, Math.PI * 2);
+          ring.x = tx.x;
+          ring.y = tx.y;
+          titleContainer.addChildAt(ring, 0);
+        }
+      }
+    }
+
+    plinkoBg.clear();
+    plinkoBg.lineStyle(2, 0x4a3d28);
+    plinkoBg.beginFill(0x1e1812, 0.95);
+    plinkoBg.drawRoundedRect(boardRect.x - 4, boardRect.y - 4, boardRect.w + 8, boardRect.h + 8, 4);
+    plinkoBg.endFill();
+    plinkoBackdropSprite.x = boardRect.x;
+    plinkoBackdropSprite.y = boardRect.y;
+    plinkoBackdropSprite.width = boardRect.w;
+    plinkoBackdropSprite.height = boardRect.h - 2;
+    plinkoBackdropSprite.alpha = 1.0;
+    plinkoBackdropSprite.tint = 0x808080;
+    if (boardBgTexture && boardBgTexture.baseTexture && boardBgTexture.baseTexture.valid && plinkoBackdropSprite.texture !== boardBgTexture) {
+      plinkoBackdropSprite.texture = boardBgTexture;
+    }
+    plinkoBackdropSprite.visible = !!(boardBgTexture && boardBgTexture.baseTexture && boardBgTexture.baseTexture.valid);
+
+    const rowDy = (boardRect.h - 32) / CONFIG.PEG_ROWS;
+    pegG.clear();
+    for (let row = 0; row < CONFIG.PEG_ROWS; row++) {
+      const cols = CONFIG.PEG_COLS_BASE + row;
+      const rw = (cols - 1) * CONFIG.PEG_SPACING;
+      const sx = boardRect.x + (boardRect.w - rw) / 2 + CONFIG.PEG_SPACING / 2;
+      const y = boardRect.y + 16 + row * rowDy;
+      for (let col = 0; col < cols; col++) {
+        const x = sx + col * CONFIG.PEG_SPACING;
+        const isCenterPeg = (row === Math.floor(CONFIG.PEG_ROWS / 2) && col === Math.floor(cols / 2));
+        if (isCenterPeg) { centerPegPos.x = x; centerPegPos.y = y; }
+        pegG.lineStyle(0);
+        pegG.beginFill(isCenterPeg ? 0xff2222 : 0xd4a020);
+        pegG.arc(x, y, CONFIG.PEG_RADIUS, 0, Math.PI * 2);
+        pegG.endFill();
+      }
+    }
+
+    funnelG.clear();
+
+    for (let i = 0; i < CONFIG.POCKET_COUNT; i++) {
+      if (!binG[i]) {
+        binG[i] = new PIXI.Graphics();
+        binLabels[i] = new PIXI.Text('x' + CONFIG.BIN_MULTIPLIERS[i], { fontFamily: 'Arial', fontSize: 11, fill: 0xccccaa });
+        binLabels[i].anchor.set(0.5);
+        app.stage.addChild(binG[i]);
+        app.stage.addChild(binLabels[i]);
+      }
+      const bx = binRect.x + i * binRect.w;
+      binG[i].clear();
+      binG[i].lineStyle(1, 0x5a4d38);
+      binG[i].beginFill(0x2a2218);
+      binG[i].drawRect(bx + 1, binRect.y, binRect.w - 2, binRect.h);
+      binG[i].endFill();
+    }
+
+    slotMachineBg.clear();
+    slotMachineBg.lineStyle(3, 0x5a4a30);
+    slotMachineBg.beginFill(0x1a1510);
+    slotMachineBg.drawRoundedRect(slotRect.x - 2, slotRect.y - 2, slotRect.w + 4, slotRect.h + 4, 6);
+    slotMachineBg.endFill();
+    slotMachineBg.lineStyle(1, 0x6a5a40);
+    slotMachineBg.drawRoundedRect(slotRect.x, slotRect.y, slotRect.w, slotRect.h, 4);
+
+    const cellW = slotRect.w / CONFIG.SLOT_COLS;
+    const cellH = (slotRect.h - 44) / CONFIG.SLOT_ROWS;
+    const reelTop = slotRect.y + 40;
+    for (let r = 0; r < CONFIG.SLOT_ROWS; r++) {
+      for (let c = 0; c < CONFIG.SLOT_COLS; c++) {
+        const idx = r * CONFIG.SLOT_COLS + c;
+        if (!reelCells[idx]) {
+          const sp = new PIXI.Sprite(PIXI.Texture.WHITE);
+          sp.anchor.set(0.5);
+          sp.visible = false;
+          const tx = new PIXI.Text('?', { fontFamily: 'Arial', fontSize: 34, fill: 0xffffff });
+          tx.anchor.set(0.5);
+          app.stage.addChild(sp);
+          app.stage.addChild(tx);
+          reelCells[idx] = { sprite: sp, text: tx };
+        }
+        const cell = reelCells[idx];
+        const cx = slotRect.x + (c + 0.5) * cellW;
+        const cy = reelTop + (r + 0.5) * cellH;
+        cell.sprite.x = cx; cell.sprite.y = cy;
+        cell.text.x = cx; cell.text.y = cy;
+        cell.sprite.width = Math.max(24, cellW * 0.90);
+        cell.sprite.height = Math.max(24, cellH * 0.90);
+      }
+    }
+    if (state === 'Idle') {
+      const w = CONFIG.SYMBOLS.map(s => s.weight);
+      for (let i = 0; i < reelCells.length; i++) {
+        const symbol = CONFIG.SYMBOLS[weightedPick(w)];
+        setCellSymbol(reelCells[i], symbol, cellW, cellH);
+      }
+    }
+
+    creditsLabel.x = slotRect.x + 8; creditsLabel.y = slotRect.y + 8;
+    creditsText.x = slotRect.x + 8; creditsText.y = slotRect.y + 24;
+    payoutLabel.x = slotRect.x + slotRect.w - 70; payoutLabel.y = slotRect.y + 8;
+    payoutText.x = slotRect.x + slotRect.w - 70; payoutText.y = slotRect.y + 24;
+
+    const btnW = 140, btnH = 44;
+    const btnX = (W - btnW) / 2;
+    const btnY = slotRect.y + slotRect.h + 8;
+    const zoneY = fy + 6;
+    const zoneH = frameH - 12;
+    dropZoneBg.clear();
+    dropZoneBg.beginFill(0x000000, 0.5);
+    dropZoneBg.drawRoundedRect(fx + 8, zoneY, frameW - 16, zoneH, 6);
+    dropZoneBg.endFill();
+    dropBtn.clear();
+    dropBtn.lineStyle(2, 0x6a5520);
+    dropBtn.beginFill(0xd4a020);
+    dropBtn.drawRoundedRect(btnX, btnY, btnW, btnH, 8);
+    dropBtn.endFill();
+    dropBtn.beginFill(0x0, 0.3);
+    dropBtn.drawRoundedRect(btnX + 2, btnY + 2, btnW - 4, btnH - 4, 6);
+    dropBtn.endFill();
+    btnT.x = W / 2; btnT.y = btnY + btnH / 2;
+
+    dropBtnHit.clear();
+    dropBtnHit.beginFill(0, 0.01);
+    dropBtnHit.drawRect(0, 0, btnW, btnH);
+    dropBtnHit.endFill();
+    dropBtnHit.interactive = true;
+    dropBtnHit.buttonMode = true;
+    dropBtnHit.hitArea = new PIXI.Rectangle(0, 0, btnW, btnH);
+    dropBtnHit.position.set(btnX, btnY);
+
+    var htmlBtn = document.getElementById('drop-btn-html');
+    if (htmlBtn && app && app.view) {
+      var cr = app.view.getBoundingClientRect();
+      var scaleX = cr.width / (app.screen.width || 1);
+      var scaleY = cr.height / (app.screen.height || 1);
+      htmlBtn.style.left = (cr.left + btnX * scaleX) + 'px';
+      htmlBtn.style.top = (cr.top + btnY * scaleY) + 'px';
+      htmlBtn.style.width = (btnW * scaleX) + 'px';
+      htmlBtn.style.height = (btnH * scaleY) + 'px';
+      htmlBtn.style.display = 'block';
+    }
+
+    const cW = 42;
+    const cH = 34;
+    const cX = boardRect.x + boardRect.w - cW - 8;
+    const cY = boardRect.y + 10;
+    boostCounterBox.clear();
+    boostCounterBox.lineStyle(2, 0x5a2a10);
+    boostCounterBox.beginFill(0x1a0f08, 0.9);
+    boostCounterBox.drawRoundedRect(cX, cY, cW, cH, 5);
+    boostCounterBox.endFill();
+    boostCounterLabel.x = cX + cW / 2;
+    boostCounterLabel.y = cY - 7;
+    boostCounterClip.clear();
+    boostCounterClip.beginFill(0xffffff);
+    boostCounterClip.drawRoundedRect(cX + 3, cY + 3, cW - 6, cH - 6, 3);
+    boostCounterClip.endFill();
+
+    const counterCenterX = cX + cW / 2;
+    const counterCenterY = cY + cH / 2 + 1;
+    if (!counterAnimActive) {
+      boostCounterCur.text = String(boostSpinsRemaining);
+      boostCounterCur.x = counterCenterX;
+      boostCounterCur.y = counterCenterY;
+      boostCounterNext.text = '';
+      boostCounterNext.x = counterCenterX;
+      boostCounterNext.y = counterCenterY;
+    }
+    updateBucketLabelStyles();
+  }
+
+  function setDropButtonEnabled(enabled) {
+    dropBtnHit.interactive = enabled;
+    dropBtnHit.buttonMode = enabled;
+    dropBtn.alpha = enabled ? 1 : 0.5;
+    var htmlBtn = document.getElementById('drop-btn-html');
+    if (htmlBtn) htmlBtn.disabled = !enabled;
+  }
+
+  const engine = Matter.Engine.create({ gravity: { y: 1 } });
+  if (engine.world && engine.world.gravity) engine.world.gravity.scale = 0.002;
+  else if (engine.gravity) engine.gravity.scale = 0.002;
+  let ball = null;
+  let pocketBodies = [];
+  let accumulator = 0;
+  let lastLandedPocket = 4;
+
+  let spinActive = false;
+  let spinElapsedMs = 0;
+  let spinLastShuffleMs = [];
+  let spinStoppedCols = [];
+  let spinFinalSymbols = [];
+  let launchForcedIndex = -1;
+  let pendingDropBalls = 0;
+  let roundBucketHitCounts = {};
+  let dropPathPoints = [];
+  let dropPathSeg = 0;
+  let dropPathT = 0;
+  let dropPathPocket = 4;
+  let dropPathCenterPointIndex = -1;
+  let dropPathCenterApplied = false;
+  const DROP_PATH_SPEED_PX_PER_SEC = 220;
+  const DROP_ARC_HEIGHT_PX = 9;
+  function multiplierKey(mult) {
+    return String(Math.round(mult * 1000) / 1000);
+  }
+  function resetRoundBucketHits() {
+    roundBucketHitCounts = {};
+  }
+  function recordRoundBucketHit(mult) {
+    const k = multiplierKey(mult);
+    roundBucketHitCounts[k] = (roundBucketHitCounts[k] || 0) + 1;
+  }
+  function getRoundCombinedMultiplier() {
+    let total = 0;
+    const keys = Object.keys(roundBucketHitCounts);
+    for (let i = 0; i < keys.length; i++) {
+      const base = Number(keys[i]);
+      const count = roundBucketHitCounts[keys[i]];
+      total += Math.pow(base, count);
+    }
+    return total;
+  }
+
+  function setColumnRandom(col, weights, cellW, cellH) {
+    for (let r = 0; r < CONFIG.SLOT_ROWS; r++) {
+      const idx = r * CONFIG.SLOT_COLS + col;
+      setCellSymbol(reelCells[idx], CONFIG.SYMBOLS[weightedPick(weights)], cellW, cellH);
+    }
+  }
+  function setColumnFinal(col, finalSymbols, cellW, cellH) {
+    for (let r = 0; r < CONFIG.SLOT_ROWS; r++) {
+      const idx = r * CONFIG.SLOT_COLS + col;
+      setCellSymbol(reelCells[idx], CONFIG.SYMBOLS[finalSymbols[idx]], cellW, cellH);
+    }
+  }
+  function getDisplayedSymbolIndex(cell) {
+    if (cell.text && cell.text.visible) {
+      const txt = (cell.text.text || '').toLowerCase();
+      for (let i = 0; i < CONFIG.SYMBOLS.length; i++) {
+        if (((CONFIG.SYMBOLS[i].display || CONFIG.SYMBOLS[i].id || '') + '').toLowerCase() === txt) return i;
+      }
+    }
+    if (cell.sprite && cell.sprite.visible && cell.sprite.texture) {
+      for (let j = 0; j < CONFIG.SYMBOLS.length; j++) {
+        const t = getSymbolTexture(CONFIG.SYMBOLS[j]);
+        if (t && t === cell.sprite.texture) return j;
+      }
+    }
+    return 0;
+  }
+  function startSlotSpinForPachinkoLaunch() {
+    spinActive = true;
+    spinElapsedMs = 0;
+    spinLastShuffleMs = new Array(CONFIG.SLOT_COLS).fill(0);
+    spinStoppedCols = new Array(CONFIG.SLOT_COLS).fill(false);
+    spinFinalSymbols = [];
+    launchForcedIndex = -1;
+    pendingDropBalls = 0;
+    resetRoundBucketHits();
+    const weightsAll = CONFIG.SYMBOLS.map(s => s.weight);
+    const pachinkoIndex = CONFIG.SYMBOLS.findIndex(s => s.id === 'pachinko');
+    const total = CONFIG.SLOT_COLS * CONFIG.SLOT_ROWS;
+    for (let i = 0; i < total; i++) spinFinalSymbols.push(weightedPick(weightsAll));
+    if (pachinkoIndex >= 0) {
+      const reelWeights = [2.5, 5, 40, 40, 5, 2.5];
+      let pick = rng() * reelWeights.reduce((a, b) => a + b, 0);
+      let targetCol = 0;
+      for (let c = 0; c < Math.min(CONFIG.SLOT_COLS, reelWeights.length); c++) { pick -= reelWeights[c]; if (pick <= 0) { targetCol = c; break; } }
+      const targetRow = Math.floor(rng() * CONFIG.SLOT_ROWS);
+      launchForcedIndex = targetRow * CONFIG.SLOT_COLS + targetCol;
+      spinFinalSymbols[launchForcedIndex] = pachinkoIndex;
+    }
+    state = 'Spinning';
+  }
+  function drawBallAt(x, y) {
+    ballGraphic.x = x;
+    ballGraphic.y = y;
+    ballGraphic.clear();
+    ballGraphic.beginFill(0xfff3a0, 0.45);
+    ballGraphic.arc(0, 0, CONFIG.BALL_RADIUS + 3, 0, Math.PI * 2);
+    ballGraphic.endFill();
+    ballGraphic.lineStyle(1, 0x7a5600, 0.95);
+    ballGraphic.beginFill(0xffd700);
+    ballGraphic.arc(0, 0, CONFIG.BALL_RADIUS, 0, Math.PI * 2);
+    ballGraphic.endFill();
+    ballGraphic.visible = true;
+  }
+  function buildDropPath(startX) {
+    const rowDy = (boardRect.h - 32) / CONFIG.PEG_ROWS;
+    dropPathPoints = [{ x: startX, y: preDropTargetY + 4, kind: 'start' }];
+    dropPathSeg = 0;
+    dropPathT = 0;
+    dropPathCenterPointIndex = -1;
+    dropPathCenterApplied = false;
+
+    let cols = CONFIG.PEG_COLS_BASE;
+    let rw = (cols - 1) * CONFIG.PEG_SPACING;
+    let sx = boardRect.x + (boardRect.w - rw) / 2 + CONFIG.PEG_SPACING / 2;
+    let col = Math.round((startX - sx) / CONFIG.PEG_SPACING);
+    col = Math.max(0, Math.min(cols - 1, col));
+
+    for (let row = 0; row < CONFIG.PEG_ROWS; row++) {
+      cols = CONFIG.PEG_COLS_BASE + row;
+      rw = (cols - 1) * CONFIG.PEG_SPACING;
+      sx = boardRect.x + (boardRect.w - rw) / 2 + CONFIG.PEG_SPACING / 2;
+      col = Math.max(0, Math.min(cols - 1, col));
+
+      const pegX = sx + col * CONFIG.PEG_SPACING;
+      const y = boardRect.y + 16 + row * rowDy;
+      const goRight = row < (CONFIG.PEG_ROWS - 1) ? (rng() >= 0.5) : (rng() >= 0.5);
+      dropPathPoints.push({ x: pegX, y: y, kind: 'pin' });
+      if (row === Math.floor(CONFIG.PEG_ROWS / 2) && col === Math.floor(cols / 2)) {
+        dropPathCenterPointIndex = dropPathPoints.length - 1;
+      }
+
+      if (row < CONFIG.PEG_ROWS - 1) {
+        col = goRight ? (col + 1) : col;
+      }
+    }
+
+    const finalX = dropPathPoints[dropPathPoints.length - 1].x;
+    dropPathPocket = Math.floor((finalX - binRect.x) / binRect.w);
+    dropPathPocket = Math.max(0, Math.min(CONFIG.POCKET_COUNT - 1, dropPathPocket));
+    dropPathPoints.push({ x: binRect.x + (dropPathPocket + 0.5) * binRect.w, y: binRect.y + binRect.h / 2, kind: 'bucket' });
+  }
+
+  function buildPhysics() {
+    computeLayout();
+    Matter.World.clear(engine.world);
+    ball = null;
+    ballGraphic.visible = false;
+    hasLanded = false;
+
+    const wallInset = 4;
+    const funnelTop = CONFIG.FUNNEL_TOP_WIDTH / 2;
+    const leftFunnel = Matter.Bodies.fromVertices(0, 0, [
+      { x: boardRect.x + wallInset, y: boardRect.y },
+      { x: boardRect.x + wallInset, y: boardRect.y + boardRect.h + 2 },
+      { x: boardRect.x + boardRect.w / 2 - funnelTop, y: boardRect.y + boardRect.h + 2 },
+      { x: boardRect.x + boardRect.w / 2 - funnelTop, y: boardRect.y }
+    ], { isStatic: true });
+    const rightFunnel = Matter.Bodies.fromVertices(0, 0, [
+      { x: boardRect.x + boardRect.w / 2 + funnelTop, y: boardRect.y },
+      { x: boardRect.x + boardRect.w / 2 + funnelTop, y: boardRect.y + boardRect.h + 2 },
+      { x: boardRect.x + boardRect.w - wallInset, y: boardRect.y + boardRect.h + 2 },
+      { x: boardRect.x + boardRect.w - wallInset, y: boardRect.y }
+    ], { isStatic: true });
+    Matter.World.add(engine.world, [leftFunnel, rightFunnel]);
+
+    const rowDy = (boardRect.h - 32) / CONFIG.PEG_ROWS;
+    for (let row = 0; row < CONFIG.PEG_ROWS; row++) {
+      const cols = CONFIG.PEG_COLS_BASE + row;
+      const rw = (cols - 1) * CONFIG.PEG_SPACING;
+      const sx = boardRect.x + (boardRect.w - rw) / 2 + CONFIG.PEG_SPACING / 2;
+      const y = boardRect.y + 16 + row * rowDy;
+      for (let col = 0; col < cols; col++) {
+        const isCenterPeg = (row === Math.floor(CONFIG.PEG_ROWS / 2) && col === Math.floor(cols / 2));
+        const peg = Matter.Bodies.circle(sx + col * CONFIG.PEG_SPACING, y, CONFIG.PEG_RADIUS, {
+          isStatic: true,
+          restitution: 0.5,
+          friction: 0.01,
+          label: isCenterPeg ? 'center-peg' : 'peg'
+        });
+        Matter.World.add(engine.world, peg);
+      }
+    }
+
+    pocketBodies = [];
+    for (let i = 0; i < CONFIG.POCKET_COUNT; i++) {
+      const cx = binRect.x + (i + 0.5) * binRect.w;
+      const cy = binRect.y + binRect.h / 2;
+      const s = Matter.Bodies.rectangle(cx, cy, binRect.w - 2, binRect.h, {
+        isStatic: true,
+        isSensor: true,
+        label: 'pocket-' + i
+      });
+      pocketBodies.push(s);
+      Matter.World.add(engine.world, s);
+    }
+    Matter.World.add(engine.world, Matter.Bodies.rectangle(boardRect.x + boardRect.w / 2, boardRect.y + boardRect.h + 60, boardRect.w + 40, 20, { isStatic: true, label: 'floor' }));
+  }
+
+  Matter.Events.on(engine, 'collisionStart', ({ pairs }) => {
+    if (state !== 'Dropping' || !ball) return;
+    for (const p of pairs) {
+      const hitBall = (p.bodyA === ball || p.bodyB === ball) ? ball : null;
+      if (!hitBall) continue;
+      const other = p.bodyA === hitBall ? p.bodyB : p.bodyA;
+      if (other.label && other.label.startsWith('pocket-')) {
+        const idx = parseInt(other.label.split('-')[1], 10);
+        lastLandedPocket = idx;
+        Matter.World.remove(engine.world, ball);
+        ball = null;
+        ballGraphic.visible = false;
+        if (stuckBallTimer) { clearTimeout(stuckBallTimer); stuckBallTimer = null; }
+        hasLanded = true;
+        onPocketLanded(lastLandedPocket);
+        return;
+      }
+      if (other.label === 'center-peg') {
+        centerPegFlashMs = 280;
+        activateRedBoost();
+      }
+      if (other.label === 'floor') {
+        lastLandedPocket = 4;
+        Matter.World.remove(engine.world, ball);
+        ball = null;
+        ballGraphic.visible = false;
+        if (stuckBallTimer) { clearTimeout(stuckBallTimer); stuckBallTimer = null; }
+        hasLanded = true;
+        onPocketLanded(lastLandedPocket);
+        return;
+      }
+    }
+  });
+
+  function onPocketLanded(pocketIndex) {
+    state = 'Landed';
+    ballGraphic.visible = false;
+    setDropButtonEnabled(false);
+    console.log('State -> Spinning');
+
+    const mult = getPocketMultiplier(pocketIndex);
+    recordRoundBucketHit(mult);
+
+    binG[pocketIndex].clear();
+    binG[pocketIndex].lineStyle(2, 0x88ff88);
+    binG[pocketIndex].beginFill(0x2a5530, 0.6);
+    binG[pocketIndex].drawRect(binRect.x + pocketIndex * binRect.w + 1, binRect.y, binRect.w - 2, binRect.h);
+    binG[pocketIndex].endFill();
+
+    if (pendingDropBalls > 0) {
+      pendingDropBalls--;
+      setTimeout(() => {
+        if (state !== 'Landed') return;
+        preDropX = boardRect.x + (boardRect.w / 2);
+        preDropY = slotRect.y + slotRect.h - 18;
+        preDropTargetY = boardRect.y + 8;
+        state = 'PreDrop';
+        ballGraphic.visible = true;
+      }, 220);
+      return;
+    }
+
+    const roundCombinedMultiplier = getRoundCombinedMultiplier();
+    const pay = Math.floor(CONFIG.COST_PER_DROP * roundCombinedMultiplier);
+    credits += pay;
+    creditsText.text = String(credits);
+    payoutText.text = '+' + pay;
+    console.log('Result', 'bucket-mult-combined=' + roundCombinedMultiplier, pay);
+    // Consume boost spin only after full round resolves, so last-spin red hits can stack before landing.
+    consumeBoostSpinIfActive();
+    resetRoundBucketHits();
+
+    setTimeout(() => {
+      state = 'Idle';
+      for (let i = 0; i < CONFIG.POCKET_COUNT; i++) {
+        binG[i].clear();
+        binG[i].lineStyle(1, 0x5a4d38);
+        binG[i].beginFill(0x2a2218);
+        binG[i].drawRect(binRect.x + i * binRect.w + 1, binRect.y, binRect.w - 2, binRect.h);
+        binG[i].endFill();
+      }
+      updateBucketLabelStyles();
+      payoutText.text = '0';
+      setDropButtonEnabled(credits >= CONFIG.COST_PER_DROP);
+    }, 1800);
+  }
+
+  var stuckBallTimer = null;
+  function onDropTapped() {
+    console.log('DROP tapped');
+    var replacingStuck = state === 'Dropping' || state === 'PreDrop' || state === 'Spinning' || state === 'LogoShift';
+    if (replacingStuck) {
+      if (stuckBallTimer) { clearTimeout(stuckBallTimer); stuckBallTimer = null; }
+      ball = null;
+      ballGraphic.visible = false;
+      state = 'Idle';
+      hasLanded = false;
+    }
+    if (state !== 'Idle' || credits < CONFIG.COST_PER_DROP) return;
+    if (stuckBallTimer) clearTimeout(stuckBallTimer);
+    console.log('Game: drop requested');
+    if (!replacingStuck) {
+      credits -= CONFIG.COST_PER_DROP;
+      creditsText.text = String(credits);
+    }
+    applyPendingBoostReset();
+    startCarouselShiftIfPending();
+    syncBoostFromCounter();
+    state = 'Spinning';
+    hasLanded = false;
+
+    stuckBallTimer = setTimeout(function() {
+      if (state !== 'Dropping' && state !== 'PreDrop' && state !== 'Spinning' && state !== 'LogoShift') return;
+      stuckBallTimer = null;
+      ball = null;
+      ballGraphic.visible = false;
+      state = 'Idle';
+      setDropButtonEnabled(credits >= CONFIG.COST_PER_DROP);
+    }, 12000);
+
+    ballGraphic.visible = false;
+    startSlotSpinForPachinkoLaunch();
+    setDropButtonEnabled(true);
+  }
+
+  dropBtnHit.on('pointertap', onDropTapped);
+  dropBtnHit.on('pointerdown', onDropTapped);
+
+  var htmlBtn = document.getElementById('drop-btn-html');
+  if (htmlBtn) {
+    htmlBtn.onclick = function() {
+      if (state === 'Idle' && credits >= CONFIG.COST_PER_DROP) onDropTapped();
+      else if (state === 'Dropping' || state === 'PreDrop' || state === 'Spinning' || state === 'LogoShift') onDropTapped();
+    };
+  }
+
+  app.stage.addChild(bg);
+  app.stage.addChild(sceneBackdropSprite);
+  app.stage.addChild(fireflyG);
+  app.stage.addChild(goldFrame);
+  app.stage.addChild(dropZoneBg);
+  app.stage.addChild(titleContainer);
+  app.stage.addChild(plinkoBg);
+  app.stage.addChild(plinkoBackdropSprite);
+  app.stage.addChild(funnelG);
+  app.stage.addChild(boostCounterBox);
+  app.stage.addChild(boostCounterClip);
+  app.stage.addChild(boostCounterDigits);
+  app.stage.addChild(boostCounterLabel);
+  app.stage.addChild(pegG);
+  app.stage.addChild(centerPegFlash);
+  app.stage.addChild(ballGraphic);
+  app.stage.addChild(slotMachineBg);
+  app.stage.addChild(creditsLabel, creditsText, payoutLabel, payoutText);
+  app.stage.addChild(dropBtn);
+  app.stage.addChild(btnT);
+  app.stage.addChild(dropBtnHit);
+
+  resize();
+  buildPhysics();
+  setDropButtonEnabled(credits >= CONFIG.COST_PER_DROP);
+
+  requestAnimationFrame(function firstFrame() {
+    computeLayout();
+    resize();
+    buildPhysics();
+  });
+
+  window.addEventListener('resize', () => {
+    resize();
+    buildPhysics();
+  });
+
+  let logTick = 0;
+
+  app.ticker.add((t) => {
+    var dtUI = (typeof t.deltaMS === 'number' && t.deltaMS > 0) ? t.deltaMS : 1000 / 60;
+    if (centerPegFlashMs > 0) {
+      centerPegFlashMs = Math.max(0, centerPegFlashMs - dtUI);
+      var a = centerPegFlashMs / 280;
+      centerPegFlash.clear();
+      centerPegFlash.beginFill(0xff4444, 0.45 * a);
+      centerPegFlash.arc(centerPegPos.x, centerPegPos.y, CONFIG.PEG_RADIUS + 10 * (1 - a), 0, Math.PI * 2);
+      centerPegFlash.endFill();
+    } else {
+      centerPegFlash.clear();
+    }
+    if (boostSpinsRemaining === 1 && bucketBoostFactor > 1) {
+      var flashT = (Date.now() % 700) / 700;
+      var flashOn = flashT < 0.5;
+      for (var bi = 0; bi < binLabels.length; bi++) {
+        if (!binLabels[bi]) continue;
+        binLabels[bi].style.fill = flashOn ? 0xff2222 : 0xffcccc;
+        binLabels[bi].alpha = flashOn ? 1 : 0.65;
+      }
+    } else if (bucketBoostFactor > 1) {
+      for (var bj = 0; bj < binLabels.length; bj++) {
+        if (!binLabels[bj]) continue;
+        binLabels[bj].style.fill = 0xff5555;
+        binLabels[bj].alpha = 1;
+      }
+    }
+    fireflyG.clear();
+    for (var fi = 0; fi < fireflies.length; fi++) {
+      var f = fireflies[fi];
+      f.phase += (dtUI / 1000) * f.speed;
+      f.x += (f.vx * dtUI) / 1000;
+      f.y += (f.vy * dtUI) / 1000 + Math.sin(f.phase * 1.5) * 0.08;
+      var Wb = app.screen.width || window.innerWidth;
+      var Hb = app.screen.height || window.innerHeight;
+      if (f.x < -12) f.x = Wb + 12;
+      if (f.x > Wb + 12) f.x = -12;
+      if (f.y < -12) f.y = Hb + 12;
+      if (f.y > Hb + 12) f.y = -12;
+      var fa = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(f.phase * 2.3));
+      fireflyG.beginFill(0xfff5a8, fa * 0.55);
+      fireflyG.drawCircle(f.x, f.y, f.r + 1.6);
+      fireflyG.endFill();
+      fireflyG.beginFill(0xffee66, fa);
+      fireflyG.drawCircle(f.x, f.y, f.r);
+      fireflyG.endFill();
+    }
+    if (counterAnimActive) {
+      counterAnimProgress = Math.min(1, counterAnimProgress + (dtUI / COUNTER_ANIM_DURATION_MS));
+      const p = counterAnimProgress;
+      const eased = p * p * (3 - 2 * p);
+      const cW = 42;
+      const cH = 34;
+      const cX = boardRect.x + boardRect.w - cW - 8;
+      const cY = boardRect.y + 10;
+      const centerX = cX + cW / 2;
+      const centerY = cY + cH / 2 + 1;
+      const travel = cW - 8;
+      boostCounterCur.text = String(counterAnimFrom);
+      boostCounterNext.text = String(counterAnimTo);
+      boostCounterCur.x = centerX + (travel * eased);
+      boostCounterNext.x = centerX - travel + (travel * eased);
+      boostCounterCur.y = centerY;
+      boostCounterNext.y = centerY;
+      if (counterAnimProgress >= 1) {
+        counterAnimActive = false;
+        boostCounterCur.text = String(counterAnimTo);
+        boostCounterCur.x = centerX;
+        boostCounterCur.y = centerY;
+        boostCounterNext.text = '';
+      }
+    }
+    if (carouselAnimating) {
+      carouselProgress = Math.min(1, carouselProgress + (dtUI / CAROUSEL_SHIFT_DURATION_MS));
+      if (carouselProgress >= 1) {
+        completeCarouselShift();
+      } else {
+        positionBucketLabels();
+      }
+    }
+    if (state === 'LogoShift') {
+      var dtLogo = (typeof t.deltaMS === 'number' && t.deltaMS > 0) ? t.deltaMS : 1000 / 60;
+      var shiftSpeed = 520 * (dtLogo / 1000);
+      var dx = logoShiftTargetX - dropOX;
+      if (Math.abs(dx) <= shiftSpeed) {
+        dropOX = logoShiftTargetX;
+        dropOY = 28;
+        logoShiftActive = false;
+        resize();
+        preDropY = slotRect.y + slotRect.h - 18;
+        preDropTargetY = boardRect.y + 8;
+        state = 'PreDrop';
+        ballGraphic.visible = true;
+      } else {
+        dropOX += (dx > 0 ? shiftSpeed : -shiftSpeed);
+        dropOY = 28;
+        resize();
+      }
+    } else if (state === 'PreDrop') {
+      var dtPre = (typeof t.deltaMS === 'number' && t.deltaMS > 0) ? t.deltaMS : 1000 / 60;
+      preDropY -= (dtPre / 1000) * 560;
+      if (preDropY <= preDropTargetY) {
+        preDropY = preDropTargetY;
+        buildDropPath(preDropX);
+        state = 'Dropping';
+      }
+      drawBallAt(preDropX, preDropY);
+    } else if (state === 'Spinning' && spinActive) {
+      var dtSpin = (typeof t.deltaMS === 'number' && t.deltaMS > 0) ? t.deltaMS : 1000 / 60;
+      spinElapsedMs += Math.min(dtSpin, 50);
+      const cellW = slotRect.w / CONFIG.SLOT_COLS;
+      const cellH = (slotRect.h - 44) / CONFIG.SLOT_ROWS;
+      const weightsAll = CONFIG.SYMBOLS.map(s => s.weight);
+      const shuffleEvery = 65;
+      let allStopped = true;
+      for (let col = 0; col < CONFIG.SLOT_COLS; col++) {
+        if (spinStoppedCols[col]) continue;
+        allStopped = false;
+        const stopAt = 450 + (col * 280);
+        if (spinElapsedMs >= stopAt) {
+          spinStoppedCols[col] = true;
+          for (let r = 0; r < CONFIG.SLOT_ROWS; r++) {
+            const idx = r * CONFIG.SLOT_COLS + col;
+            spinFinalSymbols[idx] = getDisplayedSymbolIndex(reelCells[idx]);
+          }
+          if (launchForcedIndex >= 0 && (launchForcedIndex % CONFIG.SLOT_COLS) === col) {
+            const pachinkoIndex = CONFIG.SYMBOLS.findIndex(s => s.id === 'pachinko');
+            if (pachinkoIndex >= 0) spinFinalSymbols[launchForcedIndex] = pachinkoIndex;
+          }
+          setColumnFinal(col, spinFinalSymbols, cellW, cellH);
+          continue;
+        }
+        if ((spinElapsedMs - spinLastShuffleMs[col]) >= shuffleEvery) {
+          spinLastShuffleMs[col] = spinElapsedMs;
+          setColumnRandom(col, weightsAll, cellW, cellH);
+        }
+      }
+      if (allStopped) {
+        spinActive = false;
+        const pachinkoIndex = CONFIG.SYMBOLS.findIndex(s => s.id === 'pachinko');
+        const dropCells = [];
+        if (pachinkoIndex >= 0) {
+          for (let i = 0; i < spinFinalSymbols.length; i++) {
+            if (spinFinalSymbols[i] === pachinkoIndex) dropCells.push(i);
+          }
+        }
+        if (dropCells.length > 0) {
+          carouselShiftPending = true;
+          pendingDropBalls = dropCells.length - 1;
+          resetRoundBucketHits();
+          preDropX = boardRect.x + (boardRect.w / 2);
+          preDropY = slotRect.y + slotRect.h - 18;
+          preDropTargetY = boardRect.y + 8;
+          state = 'PreDrop';
+          ballGraphic.visible = true;
+        } else {
+          consumeBoostSpinIfActive();
+          state = 'Idle';
+          setDropButtonEnabled(credits >= CONFIG.COST_PER_DROP);
+        }
+      }
+    } else if (state === 'Dropping') {
+      var dt = Math.min(dtUI, 50);
+      var remaining = (dt / 1000) * DROP_PATH_SPEED_PX_PER_SEC;
+      while (remaining > 0 && dropPathSeg < (dropPathPoints.length - 1)) {
+        var p0 = dropPathPoints[dropPathSeg];
+        var p1 = dropPathPoints[dropPathSeg + 1];
+        var dxp = p1.x - p0.x;
+        var dyp = p1.y - p0.y;
+        var segLen = Math.max(0.0001, Math.sqrt(dxp * dxp + dyp * dyp));
+        var leftOnSeg = (1 - dropPathT) * segLen;
+        if (remaining >= leftOnSeg) {
+          remaining -= leftOnSeg;
+          dropPathSeg++;
+          dropPathT = 0;
+        } else {
+          dropPathT += remaining / segLen;
+          remaining = 0;
+        }
+      }
+      if (dropPathSeg >= (dropPathPoints.length - 1)) {
+        lastLandedPocket = dropPathPocket;
+        ballGraphic.visible = false;
+        if (stuckBallTimer) { clearTimeout(stuckBallTimer); stuckBallTimer = null; }
+        hasLanded = true;
+        onPocketLanded(lastLandedPocket);
+      } else {
+        var q0 = dropPathPoints[dropPathSeg];
+        var q1 = dropPathPoints[dropPathSeg + 1];
+        var bx = q0.x + (q1.x - q0.x) * dropPathT;
+        var by = q0.y + (q1.y - q0.y) * dropPathT;
+        var arc = (q1.kind === 'pin') ? (Math.sin(Math.PI * dropPathT) * DROP_ARC_HEIGHT_PX) : 0;
+        by -= arc;
+        drawBallAt(bx, by);
+
+        var nextPointIndex = dropPathSeg + 1;
+        if (!dropPathCenterApplied && dropPathCenterPointIndex >= 0 && nextPointIndex >= dropPathCenterPointIndex && dropPathT >= 0.92) {
+          centerPegFlashMs = 280;
+          activateRedBoost();
+          dropPathCenterApplied = true;
+        }
+      }
+    } else {
+      logTick = 0;
+    }
+  });
+
+  hideMsg();
+  } catch (e) {
+    showMsg('Error: ' + e.message + '\n\nCheck console (F12) for details.');
+    console.error(e);
+  }
+})();
+  </script>
+</body>
+</html>

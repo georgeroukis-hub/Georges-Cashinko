@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CASHINKO</title>
+  <script>
+    (function () {
+      var q = window.location.search || "";
+      var h = window.location.hash || "";
+      window.location.replace("standalone.html" + q + h);
+    })();
+  </script>
+</head>
+<body>
+  <noscript>
+    <a href="standalone.html">Open CASHINKO</a>
+  </noscript>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Plinko Slot Machine</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
